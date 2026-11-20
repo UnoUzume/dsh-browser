@@ -21,7 +21,10 @@ test('the liveness answer carries the panel kind, read from the same attribute t
   // The official client keys off this attribute to choose between its webview and iframe paths, so
   // reading the same thing keeps this plugin and the shell in agreement about which one it got.
   assert.match(bridge, /data-sidebar-browser-frame/, 'the frame kind is read from the shell\'s own marker')
-  assert.match(bridge, /frame: await sidebarFrameKind\(/, 'and reported on the liveness answer')
+  // The frame kind comes from the same one question to the shell (so it cannot disagree with the
+  // panel list in the same answer); the owner-less liveness probe never reaches that helper, and
+  // falls back to the debugger probe — which is why both spellings are in the answer.
+  assert.match(bridge, /frame: facts\?\.frame \?\? await sidebarFrameKind\(/, 'and reported on the liveness answer')
 })
 
 test('the frame kind is read without a conversation, because it is a property of the shell', () => {

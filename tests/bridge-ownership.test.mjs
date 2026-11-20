@@ -125,7 +125,7 @@ async function loadBridge () {
 const { handle, claims } = await loadBridge()
 const shell = new FakeContents(1, 'window', 'dsh-app://app/')
 
-test('list never exposes an unclaimed guest without a verified conversation panel', async () => {
+test('list shows a conversation its own claimed pages and nothing else', async () => {
   const a = new FakeContents(2, 'webview', 'https://a.example/')
   const b = new FakeContents(3, 'webview', 'https://b.example/')
   const free = new FakeContents(4, 'webview', 'https://free.example/')
@@ -134,15 +134,16 @@ test('list never exposes an unclaimed guest without a verified conversation pane
   claims.set(2, 'sessionA')
   claims.set(3, 'sessionB')
 
+  // The ledger decides what each conversation sees; a page nobody claimed (4) is never offered to
+  // either of them, whatever the renderer would say.
   const forA = (await handle({ op: 'list', owner: 'sessionA' })).sidebar.map(g => g.id)
-  // The renderer in this fixture has no identity API, so nothing can be proved about either
-  // conversation and NEITHER may see an unclaimed page. `sessionB`'s guest is shown as an
-  // illustration of that, not as the positive case: what a verified conversation sees is asserted
-  // by the two-conversation test below, where the renderer answers.
-  assert.deepEqual(forA, [], 'no claim can be verified, so no guest is exposed')
+  assert.deepEqual(forA, [2], 'A sees its own page and no other')
 
   const forB = (await handle({ op: 'list', owner: 'sessionB' })).sidebar.map(g => g.id)
-  assert.deepEqual(forB, [])
+  assert.deepEqual(forB, [3])
+
+  const unclaimed = (await handle({ op: 'list', owner: 'sessionC' })).sidebar.map(g => g.id)
+  assert.deepEqual(unclaimed, [], 'an unclaimed page is never attached to a conversation')
 })
 
 test('two conversations asking in turn are each answered with their own page', async () => {

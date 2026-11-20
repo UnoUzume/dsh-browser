@@ -21,6 +21,11 @@ const shell = { id: 1, getType: () => 'window', getURL: () => 'dsh-app://app/', 
   executeJavaScript: async expression => {
     if (expression.includes('api.panelGuests')) return JSON.stringify(expression.includes('session-a') ? [2, 3] : [4])
     if (expression.includes('api.closePanelGuest')) { const id = expression.includes(', 3)') ? 3 : 2; closed.push(id); return JSON.stringify({ ok: true, closed: 1 }) }
+    // The shell page's panel roots, as the client half publishes them: one panel here, for
+    // session-a, with a webview frame.
+    if (expression.includes('data-sidebar-right-session')) {
+      return JSON.stringify({ shown: ['session-a'], owners: ['session-a'], frame: 'webview' })
+    }
     return 'none'
   },
 }
@@ -97,13 +102,25 @@ test('closePage uses guest identity within its panel even for duplicate titles',
   await assert.rejects(handle({ op: 'closePage', id: 4, owner: 'session-a' }), /belong|panel/)
 })
 
-test('a missing client identity API is refused rather than exposing every unclaimed guest', async () => {
+test('a shell page that cannot answer scripts reports the ledger, not an error', async () => {
+  // Measured on a DSH NEXT shell whose executeJavaScript answers "Script failed to execute" for
+  // every script: every `list` failed, so the plugin could not see the page it was driving. The
+  // ledger is the authority on who holds a page; the renderer only corroborates it.
   const evaluate = shell.executeJavaScript
   contents.splice(0, contents.length, shell, guest(2), guest(4))
-  shell.executeJavaScript = async () => { throw new Error('identity API unavailable; refresh or upgrade the browser plugin client') }
+  shell.executeJavaScript = async () => { throw new Error('Script failed to execute') }
+  claims.clear()
+  claims.set(2, 'session-a')
+  closed.length = 0
   try {
-    await assert.rejects(handle({ op: 'list', owner: 'session-a' }), /refresh or upgrade/)
-    await assert.rejects(handle({ op: 'closePage', id: 4, owner: 'session-a' }), /refresh or upgrade/)
+    const answer = await handle({ op: 'list', owner: 'session-a' })
+    assert.deepEqual(answer.sidebar.map(g => g.id), [2], 'the page this conversation holds is still listed')
+    assert.equal(claims.has(4), false, 'and an unclaimed page is never attached to it')
+    assert.notEqual(answer.frame, 'webview', 'the frame kind is unknown rather than invented')
+    // Drives that need proof still refuse rather than acting on an unproven page: the part of
+    // this contract that must not weaken is "an unclaimed page is never driven", not the wording.
+    await assert.rejects(handle({ op: 'closePage', id: 4, owner: 'session-a' }))
+    assert.deepEqual(closed, [], 'and nothing was closed on that refusal')
   } finally { shell.executeJavaScript = evaluate }
 })
 

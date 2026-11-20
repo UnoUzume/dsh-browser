@@ -570,6 +570,43 @@ async function sidebarFrameKind(shellId) {
 }
 
 /**
+ * Everything the `list` op asks the shell, in one script.
+ *
+ * One round trip rather than two, and one failure mode rather than two: a shell page that cannot run
+ * scripts answers `undefined`, and the report falls back to the ledger plus the debugger probe
+ * instead of failing outright. The panel-root DOM is read in the same pass, so "which panel is on
+ * screen" and "which kind of frame it is" cannot disagree with each other.
+ * @param {import('electron').WebContents} shell - the shell window.
+ * @param {string} owner - the conversation to ask about.
+ * @returns {Promise<{guests: number[], frame: string} | undefined>} the facts, or undefined when unaskable.
+ */
+async function askPanelFacts(shell, owner) {
+  try {
+    const value = await shell.executeJavaScript(`(() => {
+      const roots = Array.from(document.querySelectorAll('[data-sidebar-right-session]'));
+      const shown = new Set(roots.map(root => root.getAttribute('data-sidebar-right-session')).filter(name => typeof name === 'string' && name !== ''));
+      const el = document.querySelector('[data-sidebar-browser-frame]');
+      const frame = el === null || el === undefined ? 'none' : (el.getAttribute('data-sidebar-browser-frame') || 'unknown');
+      const owners = new Set();
+      for (const root of roots) {
+        const name = root.getAttribute('data-sidebar-right-session');
+        if (typeof name === 'string' && name !== '') owners.add(name);
+      }
+      return JSON.stringify({ shown: Array.from(shown), owners: Array.from(owners), frame });
+    })()`, true)
+    const facts = JSON.parse(typeof value === 'string' ? value : '')
+    if (!Array.isArray(facts.shown) || !Array.isArray(facts.owners) || typeof facts.frame !== 'string') return undefined
+    // The identity question, asked only once the page has proved it can answer one.
+    const guests = owner === undefined || owner === '' || !facts.shown.includes(owner)
+      ? []
+      : await panelGuestIds(shell, owner)
+    return { guests, frame: facts.frame }
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * The `list` report's reading of a conversation's guests.
  *
  * Two failures have to read differently, and for a long time they did not. "The renderer has no
@@ -587,6 +624,27 @@ async function panelGuestIdsWhenKnown(shell, owner) {
     const text = String(error?.message ?? error)
     if (/identity API is unavailable|invalid sidebar page identity reply/.test(text)) return []
     throw error
+  }
+}
+
+/**
+ * {@link panelGuestIdsWhenKnown}, with "the renderer could not be asked at all" folded into "nothing
+ * could be proved" — for the `list` report only.
+ *
+ * Measured on a DSH NEXT 2.0.24 shell: `executeJavaScript` on the shell window answers
+ * "Script failed to execute" for scripts that are plainly fine, so the strict reader's refusal was
+ * exactly what made EVERY `list` call fail. The caller still gets its own pages (the ownership
+ * ledger is what decides that); it only loses the in-panel verification, which is the honest answer
+ * when the renderer will not answer.
+ * @param {import('electron').WebContents} shell - the shell window.
+ * @param {string} owner - the conversation to ask about.
+ * @returns {Promise<number[] | undefined>} the ids, or undefined when the ask itself failed.
+ */
+async function askPanelGuestIdsWhenKnown(shell, owner) {
+  try {
+    return await panelGuestIdsWhenKnown(shell, owner)
+  } catch {
+    return undefined
   }
 }
 
@@ -621,27 +679,31 @@ async function handle(request) {  const op = String(request?.op ?? '')
   }
   if (op === 'list') {
     pruneClaims()
+    // ONE question to the shell decides three things: this conversation's verified guests, whether
+    // its panel is on screen, and which kind of frame that panel is. It used to be two (an identity
+    // request and a DOM probe), and on a shell whose page answers neither it cost the whole report.
+    const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
+    const facts = shell === undefined ? undefined : await askPanelFacts(shell, owner)
+    const panelIds = facts?.guests ?? []
+    for (const id of panelIds) {
+      if (!claims.has(id) || claims.get(id) === owner) claims.set(id, owner)
+    }
     const all = webContents.getAllWebContents().map(describe)
     // A guest claimed by another owner is not this caller's to see or to drive. Its id, url and
     // title are that session's business; handing them over is how a session came to list pages it
     // never opened. The shell window is always reported: it is what every op drives.
-    const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
-    // A renderer WITH the identity API that refuses to answer is a different case, and it stays a
-    // refusal: falling back to "no ids" would report an empty sidebar as healthy and hide the one
-    // thing the operator can act on (refresh or upgrade the client half). Only an OLD renderer,
-    // which never had the API, is reported as "no panel here".
-    const panelIds = shell === undefined ? [] : await panelGuestIdsWhenKnown(shell, owner)
-    for (const id of panelIds) {
-      if (!claims.has(id) || claims.get(id) === owner) claims.set(id, owner)
-    }
-    const mineOrFree = all.filter(g => g.type !== 'webview'
-      || (claims.get(g.id) === owner && (!namesConversation(owner) || panelIds.includes(g.id))))
+    //
+    // A guest the renderer could not confirm stays in the report when the ledger says it is this
+    // conversation's: the ledger is the authority on WHO holds a page, and the renderer is only
+    // asked to corroborate it. Dropping it instead reported an empty sidebar for a page that was
+    // on screen, which is what drove the plugin to open a window of its own.
+    const mineOrFree = all.filter(g => g.type !== 'webview' || claims.get(g.id) === owner)
     return {
       ok: true,
       protocol: PROTOCOL,
       guests: mineOrFree,
       sidebar: mineOrFree.filter(g => g.type === 'webview'),
-      frame: await sidebarFrameKind(shell?.id),
+      frame: facts?.frame ?? await sidebarFrameKind(shell?.id),
     }
   }
   if (op === 'closePage') {
