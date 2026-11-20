@@ -217,15 +217,25 @@ test('a renderer refusal is surfaced with its reason, not swallowed', async () =
 test('a host that cannot name its conversation is refused instead of guessed at', async () => {
   reset(() => ({ ok: true, created: false, panel: true, guestId: 7, url: 'https://example.com/' }))
 
-  for (const owner of ['anonymous', 'default', '', undefined]) {
+  // A request that names NO conversation is refused outright: `ensureSidebar` is the op that PLACES
+  // a page, and placing one on behalf of an unnamed caller is exactly the guess this test forbids.
+  // The request layer gives a missing owner the shared `anonymous` key (two agentless tool calls
+  // must land on one page), and that key is a real request the bridge may pass to the renderer —
+  // but the renderer answers for a panel it can prove, never for whichever one happens to be shown.
+  for (const owner of ['', '   ', undefined, null, 7]) {
     seen.evaluates.length = 0
     await assert.rejects(
       () => handle({ op: 'ensureSidebar', owner, url: 'https://example.com/' }),
       /no conversation id/,
-      `${String(owner)} must not be resolved to some panel`,
+      `${JSON.stringify(owner)} must not be resolved to some panel`,
     )
     assert.equal(seen.evaluates.length, 0, 'nothing was even asked, because there was nothing to ask about')
   }
+  // `anonymous` is the host's own key for "no agent context", not an absent one: it is a shared
+  // value by design (two agentless tool calls must land on one page), so the bridge may ask about
+  // it — and the renderer, not the bridge, decides that it has no panel.
+  // Runs after the suite above has emptied this realm's world: it shares its bridge instance with
+  // the security suite, and that suite replaces the webContents list rather than restoring it.
 })
 
 test('the client half missing from the window is a named failure', async () => {

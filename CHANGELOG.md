@@ -4,6 +4,38 @@
 
 ## 未发布
 
+### 会话 ID 不再要求 `session-` 前缀，面板按外壳实际显示的 owner 认领
+
+DSH 的会话 ID 在不同版本里分别是 `session-<uuid>`、`aa_<hash>_sess_<rand>` 和裸 uuid，
+而 bridge 与 client 把 `/^session-/` 当作"是不是合法会话 ID"的判据（bridge 6 处、client 3 处）。
+后果不是报错，而是**误判**：`dsh_browser_open` 回"this host supplied no conversation id"，
+插件据此认为侧栏不可驱动，改开一个用户看不见的独立窗口。
+
+- 新增 `namesConversation()`：只判断"是不是一个能命名会话的非空字符串"，形状由外壳的
+  `data-sidebar-right-session` 决定。`ensureSidebar` 仍要求请求本身带上会话 ID（不拿共享键
+  去替某个会话开标签）。
+- bridge 的冷路径所有权证明：先按调用方给的名字问渲染器，问不到时**再问外壳当前显示的唯一面板**
+  ——这正是 `dsh_browser_*` 不带 agent 上下文时的情形；此前 bridge 刚放好的页面，下一次调用
+  就报 "guest N is not held by this conversation"。两个面板同时显示时不猜（宁可不给证据）。
+  `list` 的"旧版 client 没有身份 API"不再变成异常，但"有 API 却答不上来"仍是异常。
+- client 侧读操作（`panelGuest`）在调用方名字没有自己的面板、而外壳恰好只显示一个面板时，
+  改用那个面板；`openPanel` **保持严格**（不替调用方去操作人家的屏幕），`panelGuests` 作为
+  所有权证据**保持精确**，`closePanelGuest` 先由 guest 定位真正的持有者再按该持有者关闭。
+
+### macOS / NEXT 桌面端被认出来
+
+- `desktop-bridge/desktop-identity.json` 与 `FALLBACK_RULE` 增加 `dsh-desktop-next`：NEXT
+  构建下设置面板此前显示"本机没有桌面端"，而 bridge 正在那个安装里运行。
+- 安装器的默认探测补上"DSH NEXT.app"这一实际安装名，并接受直接传 `.app` 包（自动解析到
+  其 `Contents`）；测试边界仍在解析**之后**校验，解析不会成为越出测试目录的通道。
+
+### 测试
+
+新增回归：四种会话 ID 形状在 bridge 与 client 上都能用；空白 ID 仍拒绝；单面板兜底生效、
+两面板时不猜；NEXT 包名被识别；安装器探测包含 `DSH NEXT.app` 并接受 bundle 参数。
+三个安装器隔离测试在本机 macOS 上连**未修改的基线**也失败（`/tmp` 与 `/private/tmp`
+真实路径不一致，测试内的边界校验先于其自身路径归一化），与本次改动无关。
+
 ### 桌面端探测补上注册表与平台约定位置
 
 `findDesktopInstall` 与安装器的默认探测已改为多根扫描，但仍有两个真实安装看不见：

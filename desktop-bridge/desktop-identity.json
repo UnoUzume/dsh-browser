@@ -1,8 +1,9 @@
 {
-  "_comment": "What proves a directory is DSH Desktop, in one place: the installer (desktop-bridge/install.mjs) and the plugin's status reader (src/browser-electron/bridge-status.ts) both read this file, and a test asserts neither hard-codes a second copy. A generic Electron layout — resources/app/lib/main.js or resources/app.asar — is NOT proof: any Electron app has that shape.",
+  "_comment": "What proves a directory is DSH Desktop, in one place: the installer (desktop-bridge/install.mjs) and the plugin's status reader (src/browser-electron/bridge-status.ts) both read this file, and a test asserts neither hard-codes a second copy. A generic Electron layout — resources/app/lib/main.js or resources/app.asar — is NOT proof: any Electron app has that shape. The names are the ones builds have shipped under: the upstream Windows product (`@deepseek-ai/dsh-desktop`, `dsh-desktop`) and the macOS/Linux NEXT line (`dsh-desktop-next`). A build under yet another name has to be added here, and that is the whole point of the rule living in a file: on macOS the panel used to report 'no desktop here' for an install that was running the bridge inside it.",
   "packageNames": [
     "@deepseek-ai/dsh-desktop",
-    "dsh-desktop"
+    "dsh-desktop",
+    "dsh-desktop-next"
   ],
   "mainEntry": "lib/main.js",
   "_layoutNote": "resources/app.asar wins over resources/app whenever it exists, so identity is read from the archive in that case and never from the sibling extraction, which the updater leaves behind and which may be a different build."

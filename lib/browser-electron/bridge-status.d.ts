@@ -7,9 +7,13 @@
  * probe now verifies the same identity the installer does (see `desktop-identity.js`), so the
  * answer is about DSH Desktop and nothing else.
  * @param localAppData - the base directory; defaults to the environment's.
+ * @param registry - the uninstall-registry lookup; injectable so a test can close a source that is
+ *   otherwise answered by the machine it runs on. A test asserting "nothing is installed here" would
+ *   otherwise pass or fail depending on whose computer ran it.
+ * @param conventions - the platform's conventional install locations; injectable for the same reason.
  * @returns the install directory, or undefined when nothing matches.
  */
-export declare function findDesktopInstall(localAppData?: string): string | undefined;
+export declare function findDesktopInstall(localAppData?: string, registry?: () => readonly string[], conventions?: () => readonly string[]): string | undefined;
 /** One reading of the install tree. */
 export interface BridgeStatus {
     /** `installed`, `missing` or `stale`; see the module comment for what each means. */

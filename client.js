@@ -1269,6 +1269,65 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     return roots.length === 0 ? undefined : roots.filter(root => root.getAttribute("data-sidebar-right-session") === sessionId)
   }
 
+  // ===========================================================================
+  // Conversation ids and panel ownership
+  //
+  // Two assumptions used to live in this file and neither was a fact about DSH:
+  //
+  //  - that a conversation id starts with `session-`. It has shipped as `session-<uuid>`,
+  //    as `aa_<hash>_sess_<rand>` and as a bare uuid. The shell publishes the id it really
+  //    uses as `data-sidebar-right-session`, so matching the given value against THAT is the
+  //    only test worth making, and a prefix test can only turn real conversations away.
+  //  - that the caller's id is the displayed panel's id. `dsh_browser_*` calls can carry no
+  //    agent, in which case the tool layer uses its shared key and the panel owner is a
+  //    conversation that was never the caller's. The panel then cannot be found, the bridge
+  //    polls, and the plugin decides the sidebar is undrivable and opens its own window. See
+  //    `resolvePanelOwner`, which is deliberately narrow: one visible panel, or nothing.
+  // ===========================================================================
+
+  /** Whether a value can name a conversation. Empty values name none; no shape is assumed. */
+  function namesConversation(value) {
+    return typeof value === "string" && value.trim() !== ""
+  }
+
+  /**
+   * The owner of the only conversation whose panel the shell is displaying, or undefined.
+   *
+   * Several roots per conversation are normal (SessionView and its nested SidebarPanel are both
+   * marked), so the test is on the SET of names, not on the number of elements. With more than one
+   * conversation on screen there is no answer that is safe to guess, and none is given: driving
+   * another conversation's panel is the cross-session bleed the rest of this service exists to
+   * prevent, and a missing panel that gets reported beats a panel that belongs to somebody else.
+   */
+  function solePanelOwner() {
+    const owners = new Set()
+    for (const root of Array.from(document.querySelectorAll("[data-sidebar-right-session]"))) {
+      const value = root.getAttribute("data-sidebar-right-session")
+      if (namesConversation(value)) owners.add(value)
+    }
+    return owners.size === 1 ? Array.from(owners)[0] : undefined
+  }
+
+  /** Whether the shell has a panel for exactly this conversation. */
+  function hasPanelFor(sessionId) {
+    const roots = panelRootsFor(sessionId)
+    return roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0
+  }
+
+  /**
+   * The conversation whose panel a read should act on.
+   *
+   * The given id wins whenever it has a panel of its own — the common case, unchanged. The
+   * fallback only applies to a caller that named a conversation with no panel here while the
+   * shell displays exactly one that does. Placing stays strict and never uses this: a tab opened
+   * for an id the caller did not name would move a human's screen on the model's behalf.
+   */
+  function resolvePanelOwner(sessionId) {
+    if (hasPanelFor(sessionId)) return sessionId
+    const sole = solePanelOwner()
+    return sole === undefined ? sessionId : sole
+  }
+
   /**
    * Every live `<webview>` guest inside this conversation's panel subtree.
    *
@@ -1599,7 +1658,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       /** @returns what happened: an existing guest, a newly opened tab, or a named refusal. */
       openPanel(sessionId, url, options) {
         const wanted = typeof sessionId === "string" ? sessionId : ""
-        if (!/^session-/.test(wanted)) {
+        if (!namesConversation(wanted)) {
           return { ok: false, reason: "not a conversation id: " + JSON.stringify(sessionId), panel: false, guestId: null }
         }
         if (sidebarRight === null || typeof sidebarRight.openTabIn !== "function") {
@@ -1720,46 +1779,64 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       },
       /** Read-only: this conversation's current guest, if it has one. */
       panelGuest(sessionId, tabId, options) {
+        const requested = typeof sessionId === "string" ? sessionId : ""
+        // A conversation with a panel of its own is read exactly as named. Otherwise the shell may
+        // be displaying the only panel there is — the case a tool call without agent context
+        // produces — and that panel is what this read answers about.
+        const wanted = hasPanelFor(requested) ? requested : resolvePanelOwner(requested)
         if (typeof options?.viewId === "string" && options.viewId !== "") {
-          const bound = pendingTabs.get(viewKey(sessionId, options.viewId))
+          const bound = pendingTabs.get(viewKey(wanted, options.viewId))
           const intended = typeof tabId === "string" && tabId !== "" ? tabId : bound?.id
           if (intended === undefined || (bound !== undefined && bound.id !== intended)) {
-            const roots = panelRootsFor(sessionId)
-            return { panel: roots === undefined ? tabStripFor(sessionId) !== null : roots.length > 0, guestId: null, url: "" }
+            return { panel: hasPanelFor(wanted), guestId: null, url: "" }
           }
-          return guestStateFor(sessionId, intended)
+          return guestStateFor(wanted, intended)
         }
-        return guestStateFor(
-          typeof sessionId === "string" ? sessionId : "",
-          typeof tabId === "string" && tabId !== "" ? tabId : undefined,
-        )
+        return guestStateFor(wanted, typeof tabId === "string" && tabId !== "" ? tabId : undefined)
       },
-      /** All guest ids verified inside this conversation, including shell-created popup tabs. */
+      /**
+       * All guest ids verified inside this conversation, including shell-created popup tabs.
+       *
+       * Only the EXACT conversation is read here: this is the ownership evidence the bridge uses to
+       * decide what a calling conversation may drive, and answering with the displayed panel's
+       * guests would hand one conversation's pages to another. The bridge asks once for a
+       * conversation it could not otherwise place (see `assertGuestOwner`), which is where the
+       * displayed-panel fallback belongs — there the fallback is evidence, not ownership.
+       * @param sessionId - the conversation whose panel is being asked about.
+       */
       panelGuests(sessionId) {
-        if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return []
+        if (!namesConversation(sessionId)) return []
         return guestsInPanel(sessionId).map(view => view.getWebContentsId())
       },
       /** Close exactly the tab hosting this guest. An unknown shell shape must fail closed. */
       closePanelGuest(sessionId, guestId) {
         const refuse = reason => ({ ok: false, reason, closed: 0 })
-        if (typeof sessionId !== "string" || !/^session-/.test(sessionId)) return refuse("a conversation id is required")
-        const view = guestsInPanel(sessionId).find(candidate => candidate.getWebContentsId() === guestId)
+        const named = typeof sessionId === "string" ? sessionId : ""
+        if (!namesConversation(named)) return refuse("a conversation id is required")
+        // A guest proves which conversation owns it. Find it first, then act on that owner, so the
+        // tab is always listed and closed under the same id: falling back on the id alone would
+        // close the displayed panel's tab while telling the shell it belongs to another one.
+        const asked = guestsInPanel(named).find(candidate => candidate.getWebContentsId() === guestId)
+        const sole = asked === undefined ? solePanelOwner() : undefined
+        const displayed = sole === undefined ? undefined : guestsInPanel(sole).find(candidate => candidate.getWebContentsId() === guestId)
+        const view = asked ?? displayed
         if (view === undefined) return refuse("the guest does not belong to this conversation panel")
-        const roots = panelRootsFor(sessionId)
-        const containers = roots === undefined ? [tabStripFor(sessionId)].filter(Boolean) : roots
+        const owner = asked === undefined ? sole : named
+        const roots = panelRootsFor(owner)
+        const containers = roots === undefined ? [tabStripFor(owner)].filter(Boolean) : roots
         if (containers.length === 0 || sidebarRight === null || typeof sidebarRight.tabsIn !== "function") {
           return refuse("the shell cannot identify its tabs; refresh or upgrade the browser plugin client")
         }
         let tabs
-        try { tabs = sidebarRight.tabsIn(sessionId) } catch { return refuse("the conversation tabs are unavailable") }
+        try { tabs = sidebarRight.tabsIn(owner) } catch { return refuse("the conversation tabs are unavailable") }
         const allowed = new Set(tabs.map(tab => tab.id))
         const id = tabIdOfElement(view, allowed, roots)
         if (id === null) return refuse("the shell does not expose this guest's tab identity; refresh or upgrade the desktop")
         // rc.5's scoped controller runs registered cleanup and removes the shell tab as one action.
         if (typeof sidebarRight.closeIn === "function") {
           try {
-            sidebarRight.closeIn(sessionId, id)
-            if (sidebarRight.tabsIn(sessionId).some(tab => tab.id === id)) return refuse("the shell did not remove the requested conversation tab")
+            sidebarRight.closeIn(owner, id)
+            if (sidebarRight.tabsIn(owner).some(tab => tab.id === id)) return refuse("the shell did not remove the requested conversation tab")
             return { ok: true, closed: 1 }
           } catch (error) { return refuse("the shell could not close the conversation tab: " + String(error?.message ?? error)) }
         }

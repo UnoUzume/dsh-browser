@@ -59,7 +59,7 @@ test('the bridge still gates those ops — the list above is not stale', () => {
     const rest = BRIDGE.slice(start)
     const end = rest.indexOf("\n  if (op === '", 10)
     const body = end >= 0 ? rest.slice(0, end) : rest.slice(0, 6000)
-    const scoped = /pruneClaims\(\)|claims\.|assertGuestOwner\(/.test(body) || body.includes('/^session-/.test(owner)')
+    const scoped = /pruneClaims\(\)|claims\.|assertGuestOwner\(/.test(body) || body.includes('namesConversation(owner)') || body.includes('namesConversation(request?.owner)')
     assert.ok(scoped, `${op} still enforces owner scoping`)
   }
 })

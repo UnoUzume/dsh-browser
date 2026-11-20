@@ -102,6 +102,6 @@ test('the panel path asks the renderer, and names the conversation', () => {
   assert.ok(start >= 0, 'ensureSidebar exists')
   const body = lines.slice(start, start + 80).join('\n')
   assert.match(body, /evaluatePanelService\(/, 'it asks the plugin client half for this conversation panel')
-  assert.match(body, /\/\^session-\/\.test\(owner\)/, 'and refuses a caller that cannot name a conversation')
+  assert.match(body, /namesConversation\(request\?\.owner\)/, 'and refuses a request that names no conversation')
   assert.ok(!/document\.querySelector/.test(body), 'no DOM query decides where the page goes')
 })

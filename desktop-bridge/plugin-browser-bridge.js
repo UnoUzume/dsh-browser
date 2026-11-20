@@ -42,6 +42,27 @@ const PANEL_NOT_DISPLAYED = 'panel-not-displayed'
 const PANEL_INITIALIZING = 'panel-initializing'
 
 /**
+ * Whether a string can name a conversation.
+ *
+ * This used to be `/^session-/` in six places, and that shape is not a fact about DSH: conversation
+ * ids have shipped as `session-<uuid>`, as `aa_<hash>_sess_<rand>` and as a bare uuid, and the shell
+ * decides which. What the bridge actually needs from the value is that it can be matched against the
+ * panel markers the renderer publishes — and that match is the renderer's job, not the id's shape.
+ * The prefix test therefore only ever turned real conversations away: `dsh_browser_open` answered
+ * "this host supplied no conversation id" for a host that had supplied one, and the plugin fell back
+ * to a window the human could not see.
+ *
+ * What remains is the line between "some string" and "nothing": the request layer substitutes
+ * `anonymous` for an absent owner, and an empty value names no conversation at all. The ownership
+ * guard is unchanged and still decides what a named conversation may drive.
+ * @param {unknown} value - the candidate id.
+ * @returns {boolean} whether it names a conversation.
+ */
+function namesConversation(value) {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+/**
  * An Error carrying a stable code, so the code survives the socket as a field rather than as text a
  * caller has to pattern-match.
  * @param {string} code - the stable identifier.
@@ -158,7 +179,7 @@ async function evaluateInPanel(shellId, sessionId, method, params) {
   // Only a real conversation id can be matched against the shell's panels. A host that could not
   // supply one keeps the previous, unscoped behaviour: losing the scoping beats losing every DOM
   // path, and the ownership guard treats such a host the same way.
-  if (typeof sessionId !== 'string' || !sessionId.startsWith('session-')) {
+  if (!namesConversation(sessionId)) {
     return sendCdp(shellId, method, params)
   }
   if (method !== 'Runtime.evaluate' || typeof params?.expression !== 'string') {
@@ -215,11 +236,61 @@ async function assertGuestOwner(id, owner) {
   // A bridge restart, or a host that cached a guest id before the ledger existed, can leave a
   // legitimate guest unclaimed. Ask the renderer once on this cold path and re-register it.
   const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
-  if (shell !== undefined && /^session-/.test(owner)) {
-    const ids = await panelGuestIds(shell, owner).catch(() => [])
-    if (ids.includes(id)) { claims.set(id, owner); return }
+  if (shell !== undefined && namesConversation(owner)) {
+    // A bridge restart, or a host that cached a guest id before the ledger existed, can leave a
+    // legitimate guest unclaimed — so the renderer is asked, and what it proves is recorded.
+    //
+    // It is asked twice: once for the conversation the caller named, and once for the panel the
+    // shell is displaying. The second question exists because a host that supplies no agent
+    // context names a shared key, and without it the page this bridge placed a moment ago can
+    // never be proved, so every later call throws. It grants nothing by itself: a guest only
+    // answers for the conversation whose own panel subtree holds it, and a second answer is only
+    // sought when the shell displays exactly one panel, so there is no other conversation's page
+    // to be confused with.
+    //
+    // Every answer along the way is a REFUSAL rather than a reason to stop asking: an older client
+    // half has no identity API (and proves nothing, which is the safe answer), and a renderer that
+    // has one but will not answer is a fault the operator can fix. Both end in the same throw.
+    // The same reader as `list` decides what "an answer" is, so a guest proved here is a guest the
+    // caller would also have been shown.
+    const named = await panelGuestIdsWhenKnown(shell, owner)
+    if (named.includes(id)) { claims.set(id, owner); return }
+    for (const candidate of await displayedPanelOwners(shell)) {
+      const shown = await panelGuestIdsWhenKnown(shell, candidate)
+      if (shown?.includes(id) !== true) continue
+      claims.set(id, owner)
+      return
+    }
   }
   throw new Error(`guest ${id} is not held by this conversation`)
+}
+
+/**
+ * The conversations the shell is currently displaying a panel for.
+ *
+ * Empty with more than one on screen: the answer is used as evidence that a guest belongs to the
+ * caller, and with two panels visible there is no way to tell whose page it is — guessing is the
+ * cross-conversation bleed the ledger exists to prevent. The renderer publishes the owners; the
+ * bridge never derives them from an id's shape.
+ * @param {import('electron').WebContents} shell - the shell window.
+ * @returns {Promise<string[]>} at most one owner, or none.
+ */
+async function displayedPanelOwners(shell) {
+  try {
+    const value = await shell.executeJavaScript(`(() => {
+      const owners = new Set();
+      for (const root of Array.from(document.querySelectorAll('[data-sidebar-right-session]'))) {
+        const owner = root.getAttribute('data-sidebar-right-session');
+        if (typeof owner === 'string' && owner !== '') owners.add(owner);
+      }
+      return JSON.stringify(Array.from(owners));
+    })()`, true)
+    const owners = JSON.parse(value)
+    return Array.isArray(owners) && owners.length === 1 && namesConversation(owners[0]) ? [owners[0]] : []
+  } catch {
+    // No answer is the safe answer: without evidence the caller is refused, never granted.
+    return []
+  }
 }
 
 function guestById(id) {
@@ -498,9 +569,30 @@ async function sidebarFrameKind(shellId) {
   }
 }
 
+/**
+ * The `list` report's reading of a conversation's guests.
+ *
+ * Two failures have to read differently, and for a long time they did not. "The renderer has no
+ * identity API" is an installation state: the client half was not reloaded, nothing can be proved,
+ * and calling this conversation's sidebar empty is the honest report. "The renderer has the API and
+ * would not answer" is a fault the operator can fix, so it is thrown, exactly as before.
+ * @param {import('electron').WebContents} shell - the shell window.
+ * @param {string} owner - the conversation to ask about.
+ * @returns {Promise<number[]>} the guests, or an empty list when this renderer cannot be asked.
+ */
+async function panelGuestIdsWhenKnown(shell, owner) {
+  try {
+    return await panelGuestIds(shell, owner)
+  } catch (error) {
+    const text = String(error?.message ?? error)
+    if (/identity API is unavailable|invalid sidebar page identity reply/.test(text)) return []
+    throw error
+  }
+}
+
 /** Read the exact guest set from the named conversation's renderer, never from free globals. */
 async function panelGuestIds(shell, owner) {
-  if (!/^session-/.test(owner)) return []
+  if (!namesConversation(owner)) return []
   const value = await shell.executeJavaScript(`(() => {
     const api = globalThis.__dshBuiltinBrowser;
     if (!api || typeof api.panelGuests !== 'function') {
@@ -534,12 +626,16 @@ async function handle(request) {  const op = String(request?.op ?? '')
     // title are that session's business; handing them over is how a session came to list pages it
     // never opened. The shell window is always reported: it is what every op drives.
     const shell = webContents.getAllWebContents().find(g => g.getType() === 'window')
-    const panelIds = shell === undefined ? [] : await panelGuestIds(shell, owner)
+    // A renderer WITH the identity API that refuses to answer is a different case, and it stays a
+    // refusal: falling back to "no ids" would report an empty sidebar as healthy and hide the one
+    // thing the operator can act on (refresh or upgrade the client half). Only an OLD renderer,
+    // which never had the API, is reported as "no panel here".
+    const panelIds = shell === undefined ? [] : await panelGuestIdsWhenKnown(shell, owner)
     for (const id of panelIds) {
       if (!claims.has(id) || claims.get(id) === owner) claims.set(id, owner)
     }
     const mineOrFree = all.filter(g => g.type !== 'webview'
-      || (claims.get(g.id) === owner && (!/^session-/.test(owner) || panelIds.includes(g.id))))
+      || (claims.get(g.id) === owner && (!namesConversation(owner) || panelIds.includes(g.id))))
     return {
       ok: true,
       protocol: PROTOCOL,
@@ -613,7 +709,11 @@ async function handle(request) {  const op = String(request?.op ?? '')
     const url = request.url === undefined ? '' : String(request.url)
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
     if (shell === undefined) throw new Error('no shell window to drive')
-    if (!/^session-/.test(owner)) {
+    // The request must have named a conversation. `owner` above can be the shared `anonymous` key,
+    // which is right for READS (two agentless calls may share one page) and wrong for PLACING: an
+    // unnamed caller must not create a tab on whichever conversation the shell happens to display.
+    // A blank name is no name, so the placement asks this narrower question than the other ops.
+    if (!namesConversation(request?.owner)) {
       throw new Error('this host supplied no conversation id, so its own panel cannot be identified')
     }
 
@@ -821,7 +921,7 @@ async function handle(request) {  const op = String(request?.op ?? '')
   }
   if (op === 'collapseSidebar') {
     // An unscoped owner falls back to sendCdp(shell window), whose debugger attachment hangs.
-    if (!/^session-/.test(owner)) throw new Error('collapseSidebar requires a conversation id')
+    if (!namesConversation(owner)) throw new Error('collapseSidebar requires a conversation id')
     // Fold the sidebar away so the agent works without occupying the screen. The
     // guest keeps running — collapsing is presentation, exactly as §3 asks.
     const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')

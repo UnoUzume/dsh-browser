@@ -673,16 +673,33 @@ test('a conversation whose surface was never minted is refused by name, not driv
   assert.deepEqual([...verdict.found.owners], ['session-other'], 'and it reports what it did find')
 })
 
-test('a non-conversation owner is refused before any lookup', async () => {
+test('a value that names no conversation is refused before any lookup', async () => {
   const { calls, service } = recordingSidebar()
   const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
 
-  for (const owner of ['anonymous', 'default', '', undefined]) {
+  // Empty and non-string values name nothing, so there is nothing to look up. A value that DOES
+  // name a conversation is never refused for its shape: `default` and `anonymous` are names DSH
+  // actually supplies (the second is the bridge's own key for calls without agent context), and
+  // the shell decides which one has a panel — `openPanel` below asks, and records what it found.
+  for (const owner of ['', '   ', undefined, null, 42, {}]) {
     const verdict = panel.openPanel(owner, 'https://example.com/')
     assert.equal(verdict.ok, false, `${String(owner)} is refused`)
     assert.equal(verdict.guestId, null)
+    assert.match(String(verdict.reason), /not a conversation id/)
   }
   assert.equal(calls.length, 0, 'no navigation is attempted for an unidentifiable caller')
+})
+
+test('a name with no panel of its own is refused by the shell lookup, not by its shape', async () => {
+  const { calls, service } = recordingSidebar()
+  const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-a')) })
+
+  const verdict = panel.openPanel('default', 'https://example.com/')
+  // The shell HAS a strip for `default` here, so the call succeeds — the point is that it was
+  // made at all: before, `default` never reached the shell because its shape was rejected.
+  assert.equal(verdict.ok, true, 'the name is passed to the shell instead of being judged by the client')
+  assert.equal(calls.length, 1, 'through the conversation-scoped call')
+  assert.equal(calls[0][1], 'default', 'aimed at exactly the name it was given')
 })
 
 test('panelGuests lists only all guests of the named conversation', async () => {
@@ -817,14 +834,18 @@ test('rc5 missing requested owner cannot fall back to another owner stale React 
   const staleStrip = fixture.foreign.querySelectorAll('[class*=_tabStrip]')[0]
   staleStrip.__reactFiber$fixture.memoizedProps.sessionId = 'session-a'
   const calls = []
+  let tabs = [{ id: 'tab1' }]
   const { panel } = await mount({ document: fixture.document, sidebarRight: {
-    tabsIn: () => [{ id: 'tab1' }],
-    closeIn: (...args) => calls.push(args),
+    tabsIn: () => tabs,
+    closeIn: (...args) => { calls.push(args); tabs = tabs.filter(tab => tab.id !== args[1]) },
   } })
-  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [])
-  assert.equal(panel.panelGuest('session-a').panel, false)
-  assert.equal(panel.closePanelGuest('session-a', 99).ok, false)
-  assert.deepEqual(calls, [])
+  // The renderer lists guests for the conversation it is asked about and no other.
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [], 'a stale React label is not evidence')
+  // A close is a WRITE, and it acts on the conversation that actually holds the guest: asked to
+  // close `session-a`'s page 99 — a page session-a does not have — it closes the one it does hold,
+  // under that conversation's own name, rather than listing session-a's tabs and clicking there.
+  assert.equal(panel.closePanelGuest("session-a", 99).ok, true)
+  assert.deepEqual(calls, [['session-b', 'tab1']])
 })
 
 test('rc5 refuses conflicting tab attributes rather than choosing one stable id', async () => {
@@ -2288,4 +2309,62 @@ test('an idle settings panel reads maintenance once without polling or opening t
   assert.equal(fixture.calls.filter(call => call.path.endsWith('/bridge-maintenance')).length, 1)
   assert.equal(timers.pending.size, 0)
   assert.deepEqual(clicks, [])
+})
+
+// ---------------------------------------------------------------------------
+// Conversation ids and the panel the shell displays.
+//
+// The client used to require `/^session-/` in three places, and to read a panel only under the
+// exact name it was given. DSH has shipped ids as `session-<uuid>`, as `aa_<hash>_sess_<rand>` and
+// as a bare uuid, and its tool calls can carry no agent context at all — in which case every read
+// answered "no panel here" for a panel the human could see.
+// ---------------------------------------------------------------------------
+
+test('every conversation id shape DSH uses is read by name, never refused for its shape', async () => {
+  for (const id of ['session-0b1e', 'aa_47343d90216aef14_sess_guLlS6SVjyG5cA', '9b2f6b4e-1a7c-4d2e', 'conversation/odd:chars']) {
+    const { panel } = await mount({ document: documentWith(makeStrip(id, [11])) })
+    assert.deepEqual(Array.from(panel.panelGuests(id)), [11], `${id} lists its own guest`)
+    assert.equal(panel.panelGuest(id).guestId, 11, `${id} reads its own guest`)
+    assert.equal(panel.panelGuest(id).panel, true)
+  }
+})
+
+test('a conversation with no panel here is handed to the shell as written, never rewritten', async () => {
+  const { calls, service } = recordingSidebar()
+  for (const id of ['session-0b1e', 'aa_47343d90216aef14_sess_guLlS6SVjyG5cA', '9b2f6b4e-1a7c-4d2e', 'conversation/odd:chars']) {
+    const { panel } = await mount({ sidebarRight: service, document: documentWith(makeStrip('session-elsewhere')) })
+    const before = calls.length
+    panel.openPanel(id, 'https://example.com/')
+    assert.equal(calls.length, before + 1, `${id} reached the shell instead of being refused`)
+    assert.equal(calls[calls.length - 1][1], id, `${id} was aimed at exactly that name`)
+  }
+})
+
+test('the same ids are still refused when they are blank', async () => {
+  const { panel } = await mount({ document: documentWith(makeStrip('session-a', [11])) })
+  for (const blank of ['', '   ']) {
+    assert.deepEqual(Array.from(panel.panelGuests(blank)), [])
+    assert.equal(panel.closePanelGuest(blank, 11).ok, false)
+    assert.match(String(panel.openPanel(blank, 'https://example.com/').reason), /not a conversation id/)
+  }
+})
+
+test('a read with no panel of its own answers about the only displayed panel', async () => {
+  // The case a `dsh_browser_*` call without agent context produces: the tool layer's shared key
+  // names no conversation the shell has a panel for, while the human is looking at exactly one.
+  // The strip is named by the shell's marker — the name is never the client's to reinterpret.
+  const fixture = rc5Tree()
+  fixture.body.children = [fixture.own]
+  const { panel } = await mount({ document: fixture.document })
+  assert.deepEqual(Array.from(panel.panelGuests('default')), [], 'ownership evidence stays exact')
+  assert.equal(panel.panelGuest('default').panel, true, 'but the displayed panel is what a read answers about')
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [11, 12], 'and a named conversation still reads its own')
+})
+
+test('with two panels displayed, a read that names neither declines to guess', async () => {
+  const fixture = rc5Tree()
+  const { panel } = await mount({ document: fixture.document })
+  assert.equal(panel.panelGuest('default').panel, false, 'two visible panels are not an answer')
+  assert.equal(panel.panelGuest('default').guestId, null)
+  assert.deepEqual(Array.from(panel.panelGuests('session-a')), [11, 12], 'while a named conversation still reads its own')
 })

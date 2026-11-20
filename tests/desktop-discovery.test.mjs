@@ -6,9 +6,10 @@
 // still depends on the directory actually looking like DSH Desktop.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 
 import { findDesktopInstall } from '../lib/browser-electron/bridge-status.js'
 import { MAIN_BODY, writeAsar } from './fake-asar.mjs'
@@ -322,4 +323,58 @@ test('the usual roots still win over the registry and the conventions', () => {
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------------------------
+// The NEXT build's own name, and the installer's side of the same question.
+//
+// Measured on macOS: DSH NEXT ships as `dsh-desktop-next`, which the identity rule did not list, so
+// the panel reported "no DSH Desktop install was found on this machine" for the install it was
+// running inside. The installer had the mirror-image gap — it only listed the bundles the upstream
+// Windows product ships under — so its default found nothing on the same machine.
+// ---------------------------------------------------------------------------------------------
+
+test('the NEXT build is recognised by identity, not only by its directory name', () => {
+  const base = mkdtempSync(join(tmpdir(), 'dsh-discover-next-'))
+  try {
+    const contents = fakeInstall(join(base, 'Applications', 'DSH NEXT.app'), 'Contents', 'dsh-desktop-next')
+    assert.equal(
+      withEnv(base, {}, () => findDesktopInstall(undefined, noRegistry, () => [contents])),
+      contents,
+      'a NEXT install is DSH Desktop as far as the plugin is concerned',
+    )
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('the installer looks where NEXT actually installs, and accepts a bundle as its argument', async () => {
+  // The installer is a script, not a module: its helpers are read out of the source the same way the
+  // process-query test reads `runCapture`, so the real file is what is exercised.
+  const source = readFileSync(new URL('../desktop-bridge/install.mjs', import.meta.url), 'utf8')
+  const sliceFrom = (marker, next) => source.slice(source.indexOf(marker), source.indexOf(next))
+  const helpers = runInNewContext(
+    [
+      sliceFrom('function conventionalInstallRoots(', 'function conventionalBundles('),
+      sliceFrom('function conventionalBundles(', 'function installedConvention('),
+      sliceFrom('function installedConvention(', '\nconst args = ').replace(/\nconst args[\s\S]*$/, ''),
+    ].join('\n') + '\n;({ conventionalBundles, conventionalInstallRoots, installedConvention })',
+    { join, process: { platform: 'darwin', env: { HOME: '/Users/someone' } } },
+  )
+  const bundles = helpers.conventionalBundles('/Users/someone')
+  assert.ok(bundles.includes('/Applications/DSH NEXT.app'), 'the name NEXT installs under is probed')
+  assert.ok(bundles.includes('/Users/someone/Applications/DSH NEXT.app'), 'and its per-user half')
+  assert.ok(helpers.conventionalInstallRoots('darwin').includes('/Applications/DSH NEXT.app/Contents'),
+    'the install root is the bundle’s Contents directory')
+
+  // Which of those names is used comes from the machine: only a bundle that is really there answers.
+  const installed = helpers.installedConvention('darwin', candidate => candidate === '/Applications/DSH NEXT.app/Contents')
+  assert.equal(installed, '/Applications/DSH NEXT.app/Contents')
+
+  // A bundle passed on the command line resolves to its Contents directory, and only then — an
+  // existing install is never re-pointed.
+  const resolveArg = source.slice(source.indexOf("if (process.platform === 'darwin' && isAbsolute(installRoot))"),
+    source.indexOf('// The boundary is enforced AFTER'))
+  assert.match(resolveArg, /looksLikeInstall\(bundleContents\)/, 'the bundle spelling is accepted')
+  assert.match(resolveArg, /!looksLikeInstall\(installRoot\)/, 'without overriding a real install root')
 })

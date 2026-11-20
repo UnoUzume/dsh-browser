@@ -33,6 +33,9 @@ class FakeContents extends EventEmitter {
     // The panel path reaches the shell through `executeJavaScript`; it resolves with the value
     // itself, not a CDP envelope.
     this.executeJavaScript = code => Promise.resolve(JSON.stringify(panelVerdict(String(code))))
+    // The identity question is asked with `api.panelGuests(...)`; everything else on the shell is a
+    // placement or a DOM probe read from `panelVerdict`.
+    this.executeJavaScript = code => Promise.resolve(JSON.stringify(tryPanelGuestIdsAnswer(String(code)) ?? panelVerdict(String(code))))
   }
   getType () { return this.type }
   getTitle () { return this.title }
@@ -64,10 +67,41 @@ const BRIDGE = new URL('../desktop-bridge/plugin-browser-bridge.js', import.meta
  */
 let panelVerdict = () => ({ ok: true, created: false, panel: true, guestId: 2, url: '' })
 
+/**
+ * Interpret one shell script as an identity question, the way the bridge does: it is asked with
+ * `api.panelGuests(<name>)`, and the name is looked up VERBATIM. Never by the id's shape — that is
+ * the mistake this suite is about.
+ * @param code - the script the bridge evaluated in the shell.
+ * @returns the ids, or undefined when this script is not asking that question.
+ */
+function tryPanelGuestIdsAnswer (code) {
+  if (!code.includes('api.panelGuests(')) return undefined
+  const wanted = /panelGuests\\?\("?([^"\\]+)\\?"?\)/.exec(code)
+  return wanted !== null && panelGuestIds !== undefined ? panelGuestIds(wanted[1]) : []
+}
+
+/**
+ * What `api.panelGuests(owner)` answers: a real list of guest ids, or undefined for a renderer
+ * that has no identity API at all.
+ *
+ * `panelVerdict` above answers the PLACEMENT question and is shaped like a verdict; the identity
+ * reply is a bare array, and a fixture that reused the verdict made every ownership proof fail for
+ * a reason that had nothing to do with the code under test. Undefined is the default because most
+ * scenarios here are about the ledger, not about evidence.
+ */
+let panelGuestIds = undefined
+
 /** The CDP answers a shell would give. */
 globalThis.__answerCdp__ = async (id, method, params) => {
-  if (method === 'Runtime.evaluate' && String(params?.expression ?? '').includes('__dshBuiltinBrowser')) {
-    return { result: { value: JSON.stringify(panelVerdict(String(params?.expression ?? ''))) } }
+  const expression = String(params?.expression ?? '')
+  if (method === 'Runtime.evaluate' && expression.includes('__dshBuiltinBrowser')) {
+    return {
+      result: {
+        value: JSON.stringify(expression.includes('panelGuests')
+          ? tryPanelGuestIdsAnswer(expression) ?? []
+          : panelVerdict(expression)),
+      },
+    }
   }
   return { result: { value: 'OK' } }
 }
@@ -101,10 +135,14 @@ test('list never exposes an unclaimed guest without a verified conversation pane
   claims.set(3, 'sessionB')
 
   const forA = (await handle({ op: 'list', owner: 'sessionA' })).sidebar.map(g => g.id)
-  assert.deepEqual(forA, [2], 'A sees only its own claimed guest, never a global unclaimed page')
+  // The renderer in this fixture has no identity API, so nothing can be proved about either
+  // conversation and NEITHER may see an unclaimed page. `sessionB`'s guest is shown as an
+  // illustration of that, not as the positive case: what a verified conversation sees is asserted
+  // by the two-conversation test below, where the renderer answers.
+  assert.deepEqual(forA, [], 'no claim can be verified, so no guest is exposed')
 
   const forB = (await handle({ op: 'list', owner: 'sessionB' })).sidebar.map(g => g.id)
-  assert.deepEqual(forB, [3])
+  assert.deepEqual(forB, [])
 })
 
 test('two conversations asking in turn are each answered with their own page', async () => {
@@ -241,4 +279,118 @@ test('the shell shortcut is simulated nowhere in the file', () => {
   assert.ok(!/Input\.dispatchKeyEvent|sendInputEvent/.test(opening), 'sidebar initialization never simulates a shell shortcut')
   assert.ok(!/shell\.sendInputEvent/.test(source), 'native keyboard delivery never targets the shell')
   assert.ok(!/shellPrepareSidebar/.test(source), 'the launcher-card clicker is removed')
+})
+
+// ---------------------------------------------------------------------------
+// Conversation ids have no guaranteed shape.
+//
+// The bridge used to require `/^session-/` in six places. DSH has shipped ids as
+// `session-<uuid>`, as `aa_<hash>_sess_<rand>` and as a bare uuid, so on any build that was not
+// `session-`-prefixed every sidebar op refused a host that HAD named its conversation — and the
+// plugin, told the sidebar was undrivable, opened a window of its own the human never saw.
+// ---------------------------------------------------------------------------
+
+/** Each id shape DSH has been observed to use, plus one arbitrary value. */
+const CONVERSATION_ID_SHAPES = [
+  'session-2f1c0d5e-8f4b-4c47-9e0a-0f3a1b2c3d4e',
+  'aa_47343d90216aef14_sess_guLlS6SVjyG5cA',
+  '9b2f6b4e-1a7c-4d2e-8f30-5c6d7e8f9a0b',
+  'conversation/with:odd chars',
+]
+
+test('every conversation id shape DSH uses can name a panel and drive its guest', async () => {
+  for (const id of CONVERSATION_ID_SHAPES) {
+    // The shell displays THIS conversation's panel, as a real one would after the host supplied
+    // this id, and the renderer answers by that very name — never by the id's shape.
+    world.contents = [shell, new FakeContents(2, 'webview', 'https://a.example/')]
+    claims.clear()
+    panelVerdict = () => ({ ok: true, created: false, panel: true, guestId: 2, url: 'https://a.example/' })
+    presentPanels([id])
+
+    const opened = await handle({ op: 'ensureSidebar', owner: id, url: 'https://a.example/' })
+    assert.equal(opened.id, 2, `${id} resolves its own panel`)
+
+    const listed = await handle({ op: 'list', owner: id })
+    assert.deepEqual(listed.sidebar.map(g => g.id), [2], `${id} sees its own page`)
+
+    // Driving still goes through the ownership gate: a page another conversation holds is not
+    // this one's, whatever the renderer would prove about the displayed panel. (No panel is
+    // displayed here on purpose: the refusal must not depend on what can be seen.)
+    claims.clear()
+    claims.set(2, 'somebody-else')
+    presentPanels([])
+    await assert.rejects(() => handle({ op: 'cdp', id: 2, method: 'Runtime.evaluate', params: { expression: '1' }, owner: id }),
+      /not held by this conversation/, `${id} still cannot drive another conversation's page`)
+  }
+})
+
+test('a blank id is refused where a name is required, and is never a generic claim', async () => {
+  world.contents = [shell, new FakeContents(2, 'webview', 'https://a.example/')]
+  claims.clear()
+  for (const owner of ['', '   ']) {
+    await assert.rejects(() => handle({ op: 'ensureSidebar', owner, url: 'https://a.example/' }),
+      /no conversation id/, `${JSON.stringify(owner)} names nothing`)
+  }
+})
+
+test('no prefix assumption is left in the bridge code', () => {
+  const source = readFileSync(BRIDGE, 'utf8')
+  // The comment that explains the removal quotes the pattern, so the check reads code only.
+  const code = source.split('\n').filter(line => !/^\s*(\*|\/\/|\/\*)/.test(line)).join('\n')
+  assert.equal(/\/\^session-\/|startsWith\(['"]session-['"]\)/.test(code), false,
+    'the id shape is the shell\'s business; one helper decides it instead')
+})
+
+// ---------------------------------------------------------------------------
+// The panel the shell displays, used as EVIDENCE for a caller that names none of it.
+//
+// `dsh_browser_*` calls can carry no agent context, in which case the plugin's tool layer uses its
+// shared key. The bridge placed the page for that key, and then could not prove ownership of the
+// guest it had just placed — every later call threw "guest N is not held by this conversation".
+//
+// Evidence is only ever granted for a guest inside the ONE panel the shell displays. With two
+// panels on screen there is nothing to give, and the caller is refused rather than handed a page
+// that might be somebody else's.
+// ---------------------------------------------------------------------------
+
+/**
+ * Present a shell whose display shows the given conversations' panels, and a renderer that proves
+ * a guest only for those panels — never for a bare name.
+ *
+ * `panelGuests` is read out of the two places the bridge asks it: the shell-level script (where the
+ * name is embedded inside a doubly escaped template literal) and a direct CDP evaluation.
+ * @param owners - the conversations whose panels are displayed.
+ */
+function presentPanels (owners) {
+  shell.executeJavaScript = async code => code.includes('data-sidebar-right-session')
+    ? JSON.stringify(owners)
+    : JSON.stringify(tryPanelGuestIdsAnswer(String(code)) ?? panelVerdict(String(code)))
+  panelGuestIds = name => owners.includes(name) ? [2] : []
+}
+
+test('a guest in the only displayed panel is proved for a caller that names no panel', async () => {
+  const page = new FakeContents(2, 'webview', 'https://a.example/')
+  world.contents = [shell, page]
+  claims.clear()
+  panelVerdict = () => ({ ok: true, created: false, panel: true, guestId: 2, url: 'https://a.example/' })
+  presentPanels(['default'])
+
+  // `assertGuestOwner` runs on every op that drives a guest. A download only needs the proof, so it
+  // is the cheapest way to ask the question without a real transfer: the refusal that follows is
+  // about the transfer, and the ledger is already written by then.
+  page.session = { fetch: () => { throw new Error('the proof was given; the transfer is not this test') } }
+  await handle({ op: 'download', id: 2, owner: 'default', url: 'https://a.example/f', savePath: '/downloads/f' })
+    .catch(() => {})
+  assert.equal(claims.get(2), 'default', 'the displayed panel is what proved it')
+})
+
+test('two visible panels are not evidence for either of them', async () => {
+  const page = new FakeContents(2, 'webview', 'https://a.example/')
+  world.contents = [shell, page]
+  claims.clear()
+  panelVerdict = () => ({ ok: true, created: false, panel: true, guestId: 2, url: 'https://a.example/' })
+  presentPanels(['aa_one_sess_a', 'aa_two_sess_b'])
+
+  await assert.rejects(() => handle({ op: 'cdp', id: 2, method: 'Runtime.evaluate', params: {}, owner: 'default' }),
+    /not held by this conversation/, 'no evidence is invented when the answer would be a guess')
 })

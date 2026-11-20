@@ -46,7 +46,7 @@ interface IdentityRule {
  * equals the JSON, so the two can never drift apart silently.
  */
 export const FALLBACK_RULE: IdentityRule = {
-  packageNames: ['@deepseek-ai/dsh-desktop', 'dsh-desktop'],
+  packageNames: ['@deepseek-ai/dsh-desktop', 'dsh-desktop', 'dsh-desktop-next'],
   mainEntry: 'lib/main.js',
 }
 

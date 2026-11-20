@@ -84,6 +84,9 @@ export declare function handlePreviewFrame(request: IncomingMessage, response: S
  * @param request - the incoming request.
  * @param response - the response to write.
  * @param localAppData - the base directory to probe; injected so a test can point at a fixture.
+ * @param registry - the uninstall-registry lookup; injected so a test can close a source that is
+ *   otherwise answered by the machine it runs on.
+ * @param conventions - the platform's conventional install locations; injected for the same reason.
  */
-export declare function handleBridgeStatus(request: IncomingMessage, response: ServerResponse, localAppData?: string): Promise<void>;
+export declare function handleBridgeStatus(request: IncomingMessage, response: ServerResponse, localAppData?: string, registry?: () => readonly string[], conventions?: () => readonly string[]): Promise<void>;
 export {};

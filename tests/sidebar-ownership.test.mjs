@@ -50,7 +50,7 @@ test('the bridge opens a panel by conversation id, through the plugin client hal
   assert.ok(start >= 0, 'ensureSidebar exists')
   const body = lines.slice(start, start + 80).join('\n')
   assert.match(body, /evaluatePanelService\(/, 'the renderer is asked for this conversation panel')
-  assert.match(body, /\/\^session-\/\.test\(owner\)/, 'a caller that cannot name a conversation is refused')
+  assert.match(body, /namesConversation\(request\?\.owner\)/, 'a request that names no conversation is refused')
   assert.ok(!/document\.querySelector/.test(body), 'no DOM query decides where the page goes')
 })
 

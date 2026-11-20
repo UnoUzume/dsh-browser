@@ -58,7 +58,12 @@
  *
  * USAGE
  *   node desktop-bridge/install.mjs [path-to-DeepSeek-Harness-install]
- * Default path: probed under %LOCALAPPDATA%\Programs (see findDefaultInstall)
+ * The path may be the install root (the directory holding `resources`) or, on macOS, the
+ * `.app` bundle around it. Default path: the Windows roots, the uninstall registry, then this
+ * platform's conventions (see findDefaultInstall).
+ * On macOS the platform convention is answered before the %APPDATA% scan, because an unrelated
+ * Electron app sitting there (easy on a developer machine) must not outrank the DSH instance that is
+ * actually installed. Among several installed bundles, the one that is RUNNING decides.
  * Pass --revert to restore the pre-bridge state instead.
  *
  * Exit DSH Desktop normally before maintenance. --restart is an external-terminal opt-in to
@@ -140,17 +145,25 @@ function assertTestTarget(root, path) {
  * `resources/app.asar` — is stable across both, so that is what is probed.
  * @returns the install directory, or the historical default when nothing matches.
  */
+/** Whether a directory holds a desktop install in either layout (shape only; identity is separate). */
+function looksLikeInstall(candidate) {
+  return existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
+    || existsSync(join(candidate, 'resources', 'app.asar'))
+}
+
 function findDefaultInstall(testRoot) {
   const permitted = candidate => {
     if (testRoot === undefined) return true
     if (!isWithin(testRoot, resolve(candidate))) return false
     try { return isWithin(testRoot, realpathSync(candidate)) } catch { return false }
   }
-  const looksInstalled = candidate => permitted(candidate) && (existsSync(join(candidate, 'resources', 'app', 'lib', 'main.js'))
-    || existsSync(join(candidate, 'resources', 'app.asar')))
+  const looksInstalled = candidate => permitted(candidate) && looksLikeInstall(candidate)
+  // Names first (they are the usual ones), then ANY directory in the base: an install under a name
+  // this list does not know — the NEXT line's `DSH NEXT.app`, a renamed bundle — must still be found,
+  // and identity is what decides whether it is this product, not the directory's name.
   const probe = (base) => {
     if (!permitted(base)) return undefined
-    for (const named of ['DSH Desktop', 'DeepSeek Harness']) {
+    for (const named of ['DSH Desktop', 'DeepSeek Harness', 'DSH NEXT.app']) {
       const candidate = join(base, named)
       if (looksInstalled(candidate)) return candidate
     }
@@ -183,6 +196,13 @@ function findDefaultInstall(testRoot) {
     const below = probe(declared)
     if (below !== undefined) return below
   }
+  // On macOS an app in ~/Library/Application Support (<APPDATA>) is anybody's Electron app, and the
+  // DSH instance people use is the bundle in /Applications: the platform convention answers first,
+  // and among several bundles the running one wins (see installedConvention). Identity still gates.
+  if (process.platform === 'darwin') {
+    const conventionalFirst = installedConvention('darwin', permitted, 'darwin')
+    if (conventionalFirst !== undefined) return conventionalFirst
+  }
   const localAppData = process.env.LOCALAPPDATA ?? ''
   const roots = [
     ...(localAppData === '' ? [] : [join(localAppData, 'Programs')]),
@@ -200,10 +220,10 @@ function findDefaultInstall(testRoot) {
   }
   // Off Windows every root above is empty (those variables are Windows-only), so without this the
   // default answers "nothing found" on a machine that has an install. Empty on Windows.
-  for (const candidate of conventionalInstallRoots()) {
-    if (!permitted(candidate)) continue
-    if (looksInstalled(candidate)) return candidate
-  }
+  // The same predicate as the line above, for the same reason: a candidate is a place to look, and
+  // which install it IS gets verified by the caller with `desktop-identity.json`.
+  const conventional = installedConvention(process.platform, permitted)
+  if (conventional !== undefined) return conventional
   return testRoot === undefined
     ? join(localAppData === '' ? '.' : join(localAppData, 'Programs'), 'DeepSeek Harness')
     : join(testRoot, 'no-test-desktop-found')
@@ -263,17 +283,7 @@ function registeredInstallLocations() {
  */
 function conventionalInstallRoots(platform = process.platform) {
   const home = process.env.HOME ?? ''
-  if (platform === 'darwin') {
-    const bundles = [
-      '/Applications/DeepSeek Harness.app',
-      '/Applications/DSH Desktop.app',
-      ...home === '' ? [] : [
-        join(home, 'Applications', 'DeepSeek Harness.app'),
-        join(home, 'Applications', 'DSH Desktop.app'),
-      ],
-    ]
-    return bundles.map(bundle => join(bundle, 'Contents'))
-  }
+  if (platform === 'darwin') return conventionalBundles(home).map(bundle => join(bundle, 'Contents'))
   if (platform === 'linux') {
     return [
       '/opt/DeepSeek Harness',
@@ -287,6 +297,87 @@ function conventionalInstallRoots(platform = process.platform) {
     ]
   }
   return []
+}
+
+/**
+ * The macOS application bundles an install has shipped under.
+ *
+ * It names BUNDLES, not package names: which package name counts as this product is decided by
+ * `desktop-identity.json`, and every candidate still goes through that check. `DSH NEXT.app` is the
+ * name the NEXT line installs under, which the list used to miss — so on a Mac the installer's
+ * default answered "nothing found" for the only install on the machine.
+ * @param home - the user's home directory, for the per-user Applications folder.
+ * @returns bundle paths, unverified.
+ */
+function conventionalBundles(home) {
+  const names = ['DeepSeek Harness.app', 'DSH Desktop.app', 'DSH NEXT.app']
+  return [
+    ...names.map(name => join('/Applications', name)),
+    ...home === '' ? [] : names.map(name => join(home, 'Applications', name)),
+  ]
+}
+
+/**
+ * The bundle whose contents hold an install that is actually there.
+ *
+ * The convention list above is one thing and the answer is another: which of those names to print in
+ * "install it here" must come from the machine, not from a preference. A platform whose app lives
+ * in a bundle is asked in TWO shapes, because the install root the rest of this script works with is
+ * the `Contents` directory, while the thing a user opens is the bundle around it.
+ * @param platform - the platform whose convention applies; any install on any platform is tried too.
+ * @param looks - the caller's shape-and-identity check.
+ * @returns the install root to use, or undefined.
+ */
+function installedConvention(platform, looks, platformOverride = process.platform) {
+  const checked = candidate => candidate !== undefined && looks(candidate)
+  // A macOS bundle asks twice: the bundle's Contents is the install root this script patches, and
+  // the bundle itself is what appears in ~/.dsh data, so both spellings are accepted as input.
+  if (platformOverride === 'darwin') {
+    const found = conventionalBundles(process.env.HOME ?? '')
+      .map(bundle => ({ bundle, contents: join(bundle, 'Contents') }))
+      .filter(entry => checked(entry.contents))
+    // More than one can look installed — an older build left beside the current one. The one that
+    // is running is the one whose bridge the panel is talking to, so it decides; with none running
+    // the first listed name does. Identity still gates whichever answers.
+    const running = found.find(entry => bundleIsRunning(entry.bundle))
+    if (running !== undefined) return running.contents
+    if (found.length > 0) return found[0].contents
+  }
+  for (const candidate of conventionalInstallRoots(platform)) {
+    if (checked(candidate)) return candidate
+  }
+  return undefined
+}
+
+/** The separator of the platform a bundle path uses; macOS only in practice. */
+function isPathSeparator() {
+  return process.platform === 'win32' ? '\\' : '/'
+}
+
+/**
+ * Whether an application bundle is running right now.
+ *
+ * macOS only, and deliberately quiet: this only chooses between several existing installs, so a
+ * process table that cannot be read means "not known to be running" — never a refusal. `pgrep -f`
+ * compares against the executable path, which for a bundle is `<bundle>/Contents/MacOS/<name>`.
+ * @param bundle - the `.app` directory.
+ * @returns whether some process is executing from inside it.
+ */
+function bundleIsRunning(bundle) {
+  if (process.platform !== 'darwin') return false
+  // Matched against the whole command line: Electron starts helpers from `Contents/Frameworks` and
+  // the main process normally runs from `Contents/MacOS`, so either location proves it is up. The
+  // escaped form is what `pgrep -f` prints for a path with spaces; the plain form covers a bundle
+  // whose name has none. A process table that cannot be read means "not known to be running".
+  for (const pattern of [join(bundle, 'Contents').replaceAll(' ', '\\x20'), join(bundle, 'Contents')]) {
+    try {
+      execFileSync('pgrep', ['-f', pattern], { stdio: 'pipe', timeout: 5_000 })
+      return true
+    } catch {
+      // Try the next spelling.
+    }
+  }
+  return false
 }
 
 /**
@@ -424,6 +515,16 @@ let installRoot
 try {
   const boundary = testBoundary()
   installRoot = args.find(arg => !arg.startsWith('--')) ?? findDefaultInstall(boundary)
+  // On macOS the thing a person points at is the bundle, while everything below patches the
+  // `Contents` directory inside it. Accepting both spellings is what keeps the documented command
+  // (`install.mjs "/Applications/DSH NEXT.app"`) from failing with a misleading "not a DSH Desktop
+  // install" when the install is right there.
+  if (process.platform === 'darwin' && isAbsolute(installRoot)) {
+    const bundleContents = join(installRoot, 'Contents')
+    if (!looksLikeInstall(installRoot) && looksLikeInstall(bundleContents)) installRoot = bundleContents
+  }
+  // The boundary is enforced AFTER the bundle step and on the root the script will actually patch:
+  // resolving an argument outward must never be a way around the test boundary.
   assertTestTarget(boundary, installRoot)
 } catch (error) {
   console.error('bridge installer test isolation refused the operation: ' + String(error))
