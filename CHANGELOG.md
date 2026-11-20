@@ -32,6 +32,15 @@ DSH 的会话 ID 在不同版本里分别是 `session-<uuid>`、`aa_<hash>_sess_
   改用那个面板；`openPanel` **保持严格**（不替调用方去操作人家的屏幕），`panelGuests` 作为
   所有权证据**保持精确**，`closePanelGuest` 先由 guest 定位真正的持有者再按该持有者关闭。
 
+### 真机 A/B：`list` 从整体失败到可用
+
+同一台机器、同一个 DSH NEXT 2.0.24-next 外壳（见 `docs/measurements/2026-11-20-sidebar-list.md`）：
+
+| 组 | `version` | `list`（空 / `session-` / `aa_…_sess_…` 三种 owner） |
+|---|---|---|
+| 上游 0.5.8 bridge | ok | **全部 `ok:false / Script failed to execute`** |
+| 本 fork 的 bridge | ok | 全部 `ok:true`，`sidebar` 为空只因为宿主工具层未挂载、无会话认领页面 |
+
 ### macOS / NEXT 桌面端被认出来
 
 - `desktop-bridge/desktop-identity.json` 与 `FALLBACK_RULE` 增加 `dsh-desktop-next`：NEXT
