@@ -62,28 +62,28 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wqty123/dsh-browser.git"
+    "url": "git+https://github.com/UnoUzume/dsh-browser.git"
   },
-  "homepage": "https://github.com/wqty123/dsh-browser",
+  "homepage": "https://github.com/UnoUzume/dsh-browser",
   "bugs": {
-    "url": "https://github.com/wqty123/dsh-browser/issues"
+    "url": "https://github.com/UnoUzume/dsh-browser/issues"
   },
   "engines": {
     "node": ">=22.19",
-    "dsh": ">=0.1.1-rc.2 <0.3.0"
+    "dsh": ">=0.1.1-rc.2 <0.4.0"
   },
   "dependencies": {
     "electron": "^44.10.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.1.1-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2 <0.4.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.2 <0.4.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.1-rc.2 <0.4.0",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-client-locale": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.1-rc.2 <0.3.0",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.1-rc.2 <0.3.0"
+    "@deepseek-ai/dsh-client-locale": ">=0.1.1-rc.2 <0.4.0",
+    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.1-rc.2 <0.4.0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.1-rc.2 <0.4.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
