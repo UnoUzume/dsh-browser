@@ -92,7 +92,7 @@ const archiveFs = (() => {
 })()
 const { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync,
   readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } = archiveFs
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 function isWithin(root, path) {
   const part = relative(root, path)
@@ -453,7 +453,60 @@ function selectShellProcesses(rows, root, selfPid) {
  * @param root - verified Desktop installation directory.
  * @returns GUI and Chromium helper process ids.
  */
+/**
+ * The running GUI of THIS install, on macOS.
+ *
+ * The Windows reader asks PowerShell for a process table and matches on the executable path. On
+ * macOS there is no `powershell.exe` at all, so the same question is answered from `ps`: the bundle
+ * this installer patches is named by the directory it resolves, and only a process started from
+ * `<install>/../MacOS/<bundle name>` counts. That is what keeps a second DSH install — or the
+ * Electron helpers under `Frameworks/` — from being mistaken for the shell that must be closed.
+ *
+ * Like the Windows path, every failure refuses the install instead of assuming the target is closed.
+ * A process that is a parent of this installer is refused too: maintenance must run from a terminal
+ * that does not die with the application it replaces.
+ * @param root - verified Desktop installation directory (the `.app/Contents` directory).
+ * @returns the GUI process ids, empty when the shell is not running.
+ */
+function macosShellProcesses(root) {
+  const bundle = dirname(resolve(root))
+  const exe = join(bundle, 'Contents', 'MacOS', basename(bundle, '.app'))
+  const text = runCapture('ps', ['-axo', 'pid=,ppid=,command='])
+  if (text === undefined || text.trim() === '') throw new Error('could not enumerate Desktop processes')
+  const selfPid = process.pid
+  const rows = []
+  for (const line of text.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
+    if (match === null) continue
+    rows.push({ pid: Number(match[1]), ppid: Number(match[2]), command: match[3] })
+  }
+  const ancestors = new Set()
+  const byPid = new Map(rows.map(row => [row.pid, row]))
+  let cursor = selfPid
+  while (cursor > 0 && !ancestors.has(cursor)) {
+    ancestors.add(cursor)
+    cursor = byPid.get(cursor)?.ppid ?? 0
+  }
+  const selected = []
+  for (const row of rows) {
+    if (row.pid === selfPid) continue
+    // Electron helpers carry `--type=`; they belong to whichever process spawned them.
+    if (/\s--type=/.test(row.command)) continue
+    const executable = row.command.startsWith('"') ? row.command.slice(1, row.command.indexOf('"', 1)) : row.command.split(' ')[0]
+    // An executable launched from the bundle's MacOS directory, named after the bundle.
+    if (resolve(executable) !== resolve(exe)) continue
+    if (ancestors.has(row.pid)) {
+      const error = new Error('the installer is a child of DSH Desktop; run this command from a separate terminal with Node.js')
+      error.code = 'DSH_CHILD_OF_SHELL'
+      throw error
+    }
+    selected.push(row.pid)
+  }
+  return selected
+}
+
 function shellProcesses(root) {
+  if (process.platform === 'darwin') return macosShellProcesses(root)
   const text = runCapture('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-Command',
     '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); '
@@ -494,6 +547,23 @@ function runCapture(command, argv) {
  */
 let lastStartedPid
 function startShell(root) {
+  // macOS: the bundle is the directory above this install's `Contents`, and `open` is the only way
+  // to start it the way Launch Services does (the bare binary skips the bundle's own setup).
+  if (process.platform === 'darwin') {
+    if (process.env.DSH_BROWSER_TEST === '1' || process.env.NODE_TEST_CONTEXT !== undefined) {
+      console.error('test mode forbids launching DSH Desktop')
+      return false
+    }
+    const bundle = dirname(resolve(root))
+    try {
+      execFileSync('open', ['-a', bundle], { stdio: 'ignore', timeout: 30_000 })
+      console.log(`  started ${bundle}`)
+      return true
+    } catch (error) {
+      console.error(`could not start DSH Desktop: ${String(error)}; start it yourself.`)
+      return false
+    }
+  }
   const exe = join(root, 'DeepSeek Harness.exe')
   if (!existsSync(exe)) {
     console.error(`could not start DSH Desktop: ${exe} does not exist; start it yourself.`)
@@ -711,18 +781,24 @@ function extractAsar(asar, outDir) {
         continue
       }
       mkdirSync(dirname(target), { recursive: true })
+      let expected = entry.size
       if (entry.unpacked) {
         const source = join(unpackedRoot, ...relativePath.split('/'))
         if (!existsSync(source)) throw new Error(`unpacked entry is missing: ${source}`)
         copyFileSync(source, target)
         unpackedFiles += 1
+        // The copied file IS the entry. A packaged build re-signs unpacked binaries after
+        // archiving them, so the header's size is stale for exactly those (measured on DSH NEXT
+        // 2.0.24-next: 24 of 2721). Comparing against it would abort the whole extraction.
+        expected = statSync(target).size
       } else {
         const buffer = Buffer.alloc(entry.size)
-        archiveFs.readSync(fd, buffer, 0, entry.size, contentBase + Number(entry.offset))
+        const read = archiveFs.readSync(fd, buffer, 0, entry.size, contentBase + Number(entry.offset))
+        if (read !== entry.size) throw new Error(`short read for ${relativePath}: header ${entry.size}, read ${read}`)
         writeFileSync(target, buffer)
       }
       const actual = statSync(target).size
-      if (actual !== entry.size) throw new Error(`size mismatch for ${relativePath}: header ${entry.size}, wrote ${actual}`)
+      if (actual !== expected) throw new Error(`size mismatch for ${relativePath}: expected ${expected}, wrote ${actual}`)
       files += 1
       bytes += actual
     }
@@ -913,12 +989,22 @@ function validateArchive(archive) {
           continue
         }
         if (entry.unpacked === true) {
+          // The FILE is what Electron loads; the header only records that one exists. Two measured
+          // facts settle what may be checked here, both from DSH NEXT 2.0.24-next: 24 of 2721
+          // unpacked entries differ in size from the header (a packaged build re-signs Mach-O and
+          // native binaries after archiving them), and 9 are legitimately 0-byte Python package
+          // markers. So neither a size comparison nor a non-empty rule is a proof of corruption.
+          // What must hold is that the entry exists and is a regular file.
           const source = join(`${archive}.unpacked`, ...relativePath.split('/'))
           if (!existsSync(source)) {
             problems.push(`${relativePath}: listed as unpacked but ${source} is missing`)
             continue
           }
-          if (statSync(source).size !== size) problems.push(`${relativePath}: unpacked size does not match the header`)
+          try {
+            if (!statSync(source).isFile()) problems.push(`${relativePath}: unpacked entry is not a regular file`)
+          } catch (error) {
+            problems.push(`${relativePath}: unpacked entry cannot be read (${String(error)})`)
+          }
           continue
         }
         const offset = Number(entry.offset)

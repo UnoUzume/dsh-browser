@@ -32,6 +32,18 @@ DSH 的会话 ID 在不同版本里分别是 `session-<uuid>`、`aa_<hash>_sess_
   改用那个面板；`openPanel` **保持严格**（不替调用方去操作人家的屏幕），`panelGuests` 作为
   所有权证据**保持精确**，`closePanelGuest` 先由 guest 定位真正的持有者再按该持有者关闭。
 
+### 侧栏同页端到端实测通过（DSH NEXT 2.0.22-next）
+
+见 `docs/measurements/2026-11-20-sidebar-e2e.md`：`open → snapshot → execute → click → wait → content`
+六步全部落在右侧栏的同一个 `webview` 上，全程没有独立窗口，`bridge list` 始终报 `frame:"webview"`。
+安装侧用到本次新增的三段 macOS 适配（进程检查、unpacked 容差、`open -a` 启动）。
+
+### 新增只读诊断操作 `diagnose`
+
+给 bridge 加了一个只读 op：返回外壳渲染器里的面板容器、`<webview>` 数量、`dshDesktop.browser`
+暴露的方法，以及插件 client 半是否存在。它不放置、不聚焦、不驱动任何页面，用于把“面板为什么
+看不见”从猜测变成观测——这次就是靠它把 `data-sidebar-*` 标记缺失与原生视图通道区分开的。
+
 ### 真机 A/B：`list` 从整体失败到可用
 
 同一台机器、同一个 DSH NEXT 2.0.24-next 外壳（见 `docs/measurements/2026-11-20-sidebar-list.md`）：

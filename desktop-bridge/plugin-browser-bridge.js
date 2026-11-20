@@ -706,6 +706,53 @@ async function handle(request) {  const op = String(request?.op ?? '')
       frame: facts?.frame ?? await sidebarFrameKind(shell?.id),
     }
   }
+  if (op === 'diagnose') {
+    // READ-ONLY: report what the shell's renderer actually contains, so a carrier can be adapted to
+    // a panel shape instead of guessing at one. It never places, focuses or drives anything, and it
+    // answers for nobody — the question is about the page, not about a conversation's ownership.
+    //
+    // Written after a measured mismatch: DSH NEXT 2.0.24-next renders its sidebar browser as a
+    // native view inside `.hmzQAW_viewport` and publishes no `[data-sidebar-right-session]` or
+    // `[data-sidebar-browser-frame]`, so every frame probe answered "none" on a panel the human
+    // could see. Without this op the adapter work could only be done by reading minified sources.
+    const shell = webContents.getAllWebContents().find(contents => contents.getType() === 'window')
+    if (shell === undefined) return { ok: true, shell: undefined, frame: 'none' }
+    const script = `(() => {
+      const classes = (root) => Array.from(root.querySelectorAll('[class]')).map(node => String(node.className));
+      const unique = (list) => Array.from(new Set(list)).filter(name => /viewport|webview|browser|frame|native/i.test(name)).slice(0, 20);
+      const prefix = classes(document).map(name => (/([a-zA-Z0-9]+)_[a-zA-Z0-9]+/.exec(name) ?? [])[1]).filter(Boolean);
+      return JSON.stringify({
+        protocolVersion: globalThis.dshDesktop?.protocolVersion ?? null,
+        desktopBrowserKeys: globalThis.dshDesktop?.browser === undefined ? null : Object.keys(globalThis.dshDesktop.browser),
+        clientHalf: typeof globalThis.__dshBuiltinBrowser === 'object' && globalThis.__dshBuiltinBrowser !== null,
+        panels: document.querySelectorAll('[data-sidebar-right-session]').length,
+        frames: Array.from(document.querySelectorAll('[data-sidebar-browser-frame]')).map(node => node.getAttribute('data-sidebar-browser-frame')),
+        webviews: document.querySelectorAll('webview').length,
+        viewports: document.querySelectorAll('[class*="_viewport"]').length,
+        candidateClasses: unique(classes(document)),
+        classPrefixes: Array.from(new Set(prefix)).slice(0, 10),
+        tabs: document.querySelectorAll('[role=tab]').length,
+        browserApi: globalThis.dshDesktop?.browser === undefined ? null : Object.fromEntries(
+          Object.entries(globalThis.dshDesktop.browser).map(([name, value]) => [name, {
+            type: typeof value,
+            length: typeof value === 'function' ? value.length : null,
+            head: typeof value === 'function' ? String(value).slice(0, 220) : null,
+          }]),
+        ),
+      });
+    })()`
+    let value
+    try {
+      value = await shell.executeJavaScript(script, true)
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) }
+    }
+    try {
+      return { ok: true, shell: shell.id, report: JSON.parse(String(value)) }
+    } catch {
+      return { ok: false, error: 'the renderer answered with something that is not JSON' }
+    }
+  }
   if (op === 'closePage') {
     const id = Number(request.id)
     if (!Number.isSafeInteger(id) || id <= 0) throw new Error('closePage requires a numeric guest id')
