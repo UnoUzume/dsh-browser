@@ -367,9 +367,30 @@ test('the installer looks where NEXT actually installs, and accepts a bundle as 
   assert.ok(helpers.conventionalInstallRoots('darwin').includes('/Applications/DSH NEXT.app/Contents'),
     'the install root is the bundle’s Contents directory')
 
-  // Which of those names is used comes from the machine: only a bundle that is really there answers.
-  const installed = helpers.installedConvention('darwin', candidate => candidate === '/Applications/DSH NEXT.app/Contents')
-  assert.equal(installed, '/Applications/DSH NEXT.app/Contents')
+  // Which of those names is used comes from the machine, and which INSTALL when several are present
+  // comes from the process table. Aiming an install at a DSH that is not the one in use is worse
+  // than saying "not found", so several-present-with-none-running has no answer at all.
+  // The slice carries the real `bundleIsRunning`; a probe replaces it inside the fresh context.
+  const body = sliceFrom('function conventionalInstallRoots(', '\nconst args = ').replace(/\nconst args[\s\S]*$/, '')
+    .replace(/function bundleIsRunning\(bundle\) \{[\s\S]*?\n\}/, '')
+  const withRunning = bundle => runInNewContext(body + '\n;installedConvention', {
+    join, process: { platform: 'darwin', env: { HOME: '/Users/someone' } }, bundleIsRunning: bundle === true ? () => true : bundle,
+  })
+  // "Several present": the look predicate accepts everything, which is the shape of a machine with
+  // more than one DSH bundle installed. None running must then answer nothing.
+  // Two bundles present, none running. The macOS leg has no answer, and the platform convention
+  // below it (the same list) must not quietly supply one either — so the answer is "not found".
+  const nothingRunning = withRunning(() => false)
+  assert.equal(nothingRunning('darwin', candidate => candidate === '/Applications/DSH NEXT.app/Contents'
+    || candidate === '/Applications/DSH Desktop.app/Contents', 'darwin'), undefined,
+    'several bundles, none running: no answer rather than a guess')
+  // "Exactly one present": the predicate accepts only the NEXT bundle.
+  const onePresent = withRunning(() => false)
+  assert.equal(onePresent('darwin', candidate => candidate === '/Applications/DSH NEXT.app/Contents', 'darwin'),
+    '/Applications/DSH NEXT.app/Contents', 'a single install is used whether or not it is running')
+  const nextRunning = withRunning(bundle => bundle === '/Applications/DSH NEXT.app')
+  assert.equal(nextRunning('darwin', candidate => candidate === '/Applications/DSH NEXT.app/Contents', 'darwin'),
+    '/Applications/DSH NEXT.app/Contents', 'the running bundle is the one used')
 
   // A bundle passed on the command line resolves to its Contents directory, and only then — an
   // existing install is never re-pointed.

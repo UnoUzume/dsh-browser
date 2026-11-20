@@ -38,6 +38,10 @@ DSH 的会话 ID 在不同版本里分别是 `session-<uuid>`、`aa_<hash>_sess_
   构建下设置面板此前显示"本机没有桌面端"，而 bridge 正在那个安装里运行。
 - 安装器的默认探测补上"DSH NEXT.app"这一实际安装名，并接受直接传 `.app` 包（自动解析到
   其 `Contents`）；测试边界仍在解析**之后**校验，解析不会成为越出测试目录的通道。
+- 多份安装时的取舍（真机 `/Applications` 同时有 `DeepSeek Harness.app` 与 `DSH NEXT.app`）：
+  只有一份就直接用；多份时**只有正在运行的那份**算答案——都不在跑就报"没找到"，而不是随手
+  挑一个（挑错等于往另一个应用里装 bridge）。实测：NEXT 在跑时解析到 NEXT，`DeepSeek Harness.app`
+  被正确跳过。
 
 ### 测试
 

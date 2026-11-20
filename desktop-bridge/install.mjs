@@ -333,15 +333,25 @@ function installedConvention(platform, looks, platformOverride = process.platfor
   // A macOS bundle asks twice: the bundle's Contents is the install root this script patches, and
   // the bundle itself is what appears in ~/.dsh data, so both spellings are accepted as input.
   if (platformOverride === 'darwin') {
+    // Every bundle that is there, first. Exactly one needs no tie-break. SEVERAL do — the packaged
+    // product beside a development build — and then only a running one decides: nobody running
+    // means there is no right answer to invent, and a guess here aims an install at the wrong
+    // application, which is the one mistake this script must never make. The caller then gets
+    // "not found", and the explicit path (or a running shell) supplies the answer. Neither branch
+    // re-derives the list: scanning the same paths again would just pick the first one.
     const found = conventionalBundles(process.env.HOME ?? '')
       .map(bundle => ({ bundle, contents: join(bundle, 'Contents') }))
       .filter(entry => checked(entry.contents))
-    // More than one can look installed — an older build left beside the current one. The one that
-    // is running is the one whose bridge the panel is talking to, so it decides; with none running
-    // the first listed name does. Identity still gates whichever answers.
+    if (found.length === 1) return found[0].contents
+    if (found.length === 0) {
+      for (const candidate of conventionalInstallRoots(platform)) {
+        if (checked(candidate)) return candidate
+      }
+    }
+    // Also when several are present: only a running bundle may break the tie. The plain scan above
+    // already returned nothing in this case, so there is nothing left to fall back to on purpose.
     const running = found.find(entry => bundleIsRunning(entry.bundle))
-    if (running !== undefined) return running.contents
-    if (found.length > 0) return found[0].contents
+    return running === undefined ? undefined : running.contents
   }
   for (const candidate of conventionalInstallRoots(platform)) {
     if (checked(candidate)) return candidate
@@ -367,9 +377,10 @@ function bundleIsRunning(bundle) {
   if (process.platform !== 'darwin') return false
   // Matched against the whole command line: Electron starts helpers from `Contents/Frameworks` and
   // the main process normally runs from `Contents/MacOS`, so either location proves it is up. The
-  // escaped form is what `pgrep -f` prints for a path with spaces; the plain form covers a bundle
-  // whose name has none. A process table that cannot be read means "not known to be running".
-  for (const pattern of [join(bundle, 'Contents').replaceAll(' ', '\\x20'), join(bundle, 'Contents')]) {
+  // plain path is matched as-is — macOS records a path with spaces verbatim in the process table
+  // (measured: the escaped `\x20` form only matches escaped command strings). A process table that
+  // cannot be read means "not known to be running".
+  for (const pattern of [join(bundle, 'Contents'), join(bundle, 'Contents').replaceAll(' ', '\\x20')]) {
     try {
       execFileSync('pgrep', ['-f', pattern], { stdio: 'pipe', timeout: 5_000 })
       return true
